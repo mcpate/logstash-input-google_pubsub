@@ -21,6 +21,8 @@ require "logstash/namespace"
 
 require 'java'
 require 'logstash-input-google_pubsub_jars.rb'
+require 'json'
+require 'google/cloud/storage'
 
 # This is a https://github.com/elastic/logstash[Logstash] input plugin for 
 # https://cloud.google.com/pubsub/[Google Pub/Sub]. The plugin can subscribe 
@@ -213,6 +215,8 @@ class LogStash::Inputs::GooglePubSub < LogStash::Inputs::Base
   # recommended for most use-cases.
   config :create_subscription, :validate => :boolean, :required => false, :default => false
 
+  config :file_destination_folder, :validate => :path, :required => true
+
   # If undefined, Logstash will complain, even if codec is unused.
   default :codec, "plain"
 
@@ -250,6 +254,17 @@ class LogStash::Inputs::GooglePubSub < LogStash::Inputs::Base
     handler = MessageReceiver.new do |message|
       # handle incoming message, then ack/nack the received message
       data = message.getData().toStringUtf8()
+      msg_attributes = message.getAttributes()
+
+      msg_event_type =msg_attributes.get("eventType").to_s
+      bucket_id = msg_attributes.get("bucketId").to_s
+      object_id = msg_attributes.get("objectId").to_s
+
+      if msg_event_type == "OBJECT_FINALIZE"
+        @logger.info("Reveiced object creation event message | bucket=#{bucket_id} | filename=#{object_id}")
+        download_file(bucket_id, object_id)
+      end
+
       @codec.decode(data) do |event|
         event.set("host", event.get("host") || @host)
         event.set("[@metadata][pubsub_message]", extract_metadata(message)) if @include_metadata
@@ -285,4 +300,14 @@ class LogStash::Inputs::GooglePubSub < LogStash::Inputs::Base
       publishTime: Timestamps.toString(java_message.getPublishTime())
     }
   end
+
+  def download_file(bucket_name, file_name)
+    storage = Google::Cloud::Storage.new project: :project_id, credentials: :json_key_file
+    bucket  = storage.bucket bucket_name
+    file    = bucket.file file_name
+
+    file.download "#{@file_destination_folder}/#{file_name}"
+  end
+
+
 end
